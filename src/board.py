@@ -3,9 +3,15 @@ import time
 import threading
 import pygame
 import random
+import logging
 
 class Board:
-    def __init__(self, fList=[], inputs={}):
+    def __init__(self, fList=[], inputs={}, logFile=None):
+        self.logFile = logFile
+        # self.logger = self.createLogger()
+        logging.basicConfig(filename=self.logFile,
+                            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+                            level=logging.DEBUG)
         GPIO.setmode(GPIO.BOARD)
         random.seed(time.time())
         self.fList = fList
@@ -15,113 +21,74 @@ class Board:
         self.ledOut = 16
         self.volDownBtn = 13
         self.volUpBtn = 15
+        # set the volume
+        pygame.mixer.music.set_volume(0.5)
         self.pull = GPIO.PUD_UP
         GPIO.setup(self.playBtn, GPIO.IN, pull_up_down=self.pull)
         GPIO.setup(self.stopBtn, GPIO.IN, pull_up_down=self.pull)
         GPIO.setup(self.volUpBtn, GPIO.IN, pull_up_down=self.pull)
         GPIO.setup(self.volDownBtn, GPIO.IN, pull_up_down=self.pull)
+        GPIO.add_event_detect(self.volUpBtn,
+                              GPIO.FALLING,
+                              callback=self.turnVolUp,
+                              bouncetime=25)
+        GPIO.add_event_detect(self.volDownBtn,
+                              GPIO.FALLING,
+                              callback=self.turnVolDown,
+                              bouncetime=25)
         GPIO.setup(self.ledOut, GPIO.OUT)
-        self.playEvent = threading.Event()
-        self.stopEvent = threading.Event()
-        self.volUpEvent = threading.Event()
-        self.volDownEvent = threading.Event()
-        self.state = {self.volDownBtn: 1,
-                      self.volUpBtn: 1,
-                      self.stopBtn: 1,
-                      self.playBtn: 1}
-        self.events = {self.volDownBtn: self.volDownEvent,
-                       self.volUpBtn: self.volUpEvent,
-                       self.stopBtn: self.stopEvent,
-                       self.playBtn: self.playEvent}
+        self.playing = False
         self.killpill = threading.Event()
-        self.keydelay = 0.001 # 0.001
+        self.keydelay = 0.001 # 0.001                random.shuffle(self.fList)
 
-    def volumeUp(self):
-        while True:
-            if self.killpill.is_set():
-                return
-            self.events[self.volUpBtn].wait(1)
-            if self.events[self.volUpBtn].is_set():
-                vol = pygame.mixer.music.get_volume()
-                pygame.mixer.music.set_volume(min(1.0, vol + 0.05))
-                # print pygame.mixer.music.get_volume()
-                self.events[self.volUpBtn].clear()
-
-    def volumeDown(self):
-        while True: 
-            if self.killpill.is_set():
-                return
-            self.events[self.volDownBtn].wait(1)
-            if self.events[self.volDownBtn].is_set():
-                vol = pygame.mixer.music.get_volume()
-                pygame.mixer.music.set_volume(max(0.0, vol - 0.05))
-                # print pygame.mixer.music.get_volume()
-                self.events[self.volDownBtn].clear()
-
-                
-    def playMP3(self):
-        while True:
-            if self.killpill.is_set():
-                return
-            time.sleep(1)
-            if not self.events[self.playBtn].is_set():
-                continue
-            if len(self.fList) > 0:
-                random.shuffle(self.fList)
-                pygame.mixer.music.load(self.fList[0])
-                pygame.mixer.music.play()
-            while self.events[self.playBtn].wait(0.01) or self.events[self.stopBtn].wait(0.01):
-                time.sleep(0.001)
-            pygame.mixer.music.stop()
-            
-
-    def run(self):
-        self.threads = {'play': threading.Thread(target=self.playMP3),
-                        'volUp': threading.Thread(target = self.volumeUp),
-                        'volDown': threading.Thread(target = self.volumeDown),
-        }
-                        #'volDown': None}
-        for k in self.threads:
-            self.threads[k].start()
-        try:
-            while True:
-                time.sleep(self.keydelay)
-                # read button state
-                switched = self.readButtons()
-                for k in switched.keys():
-                    if switched[k]:
-                        if self.events[k].is_set():
-                            self.events[k].clear()
-                            # print "Cleared event %d." % k
-                        else:
-                            self.events[k].set()
-                            # print "Set event %d." % k
-        except Exception as e:
-            print e
-            self.killpill.set()
-            for k in self.threads:
-                self.threads[k].join()            
-
-            
-    def readButtons(self):
-        new_state = dict(self.state)
-        outputs = dict(self.state)
-        for k in self.state.keys():
-            new_state[k] = GPIO.input(k)
-            outputs[k] = (new_state[k] == 0) and (new_state[k] != self.state[k])
-        self.state = new_state
-        # print self.state, outputs
-        return outputs
-    
-    def getPlayButton(self):
-        return GPIO.input(self.playBtn)
-
-    def setLED(self, flag):
-        if flag:
-            flag = 1
+    def createLogger(self):
+        self.logger = logging.getLogger('baby_wn')
+        self.logger.setLevel(logging.ERROR)
+        if self.logFile is None:
+            fh = logging.StreamHandler()
         else:
-            flag = 0
-        GPIO.output(self.ledOut, flag)
-    
-    def readState(self):
-        return (GPIO.input(self.playBtn))
+            fh = logging.FileHandler(self.logFile)
+        fh.setLevel(logging.ERROR)
+        formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        fh.setFormatter(formatter)
+        self.logger.addHandler(fh)
+        return self.logger
+            
+    def turnVolUp(self, channel):
+        vol = pygame.mixer.music.get_volume()
+        pygame.mixer.music.set_volume(min(1.0, vol + 0.05))
+        logging.info("Set the volume to {}".format(vol))
+        
+    def turnVolDown(self, channel):
+        vol = pygame.mixer.music.get_volume()
+        pygame.mixer.music.set_volume(max(0.0, vol - 0.05))
+        logging.info("Set the volume to {}".format(vol))
+
+    def startMP3(self, fList):
+
+        if len(fList) > 0:
+            ch = None
+            while ch is None:
+                random.shuffle(fList)
+                pygame.mixer.music.load(fList[0])
+                logging.info("Playing file '{}'".format(fList[0]))
+                pygame.mixer.music.play()
+                while ch is None:
+                    ch = GPIO.wait_for_edge(self.playBtn, GPIO.FALLING, timeout=1000, bouncetime=500)
+                    if self.killpill.is_set():
+                        logging.info("'startMP3' received the killpill")
+                        pygame.mixer.music.stop()
+                        return
+                    if not pygame.mixer.music.get_busy():
+                        break
+            pygame.mixer.music.stop()
+
+    def manage_player(self):
+        while True:
+            logging.info("Waiting for play commands...")
+            ch = GPIO.wait_for_edge(self.playBtn, GPIO.FALLING, bouncetime=500)
+            self.startMP3(self.fList)
+            if self.killpill.is_set():
+                logging.info("Received the killpill")
+                return
+            
